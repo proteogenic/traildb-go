@@ -34,6 +34,8 @@ type TrailDB struct {
 	maxTimestamp  uint64
 	fieldNames    []string
 	fieldNameToId map[string]uint64
+
+	path string
 }
 
 type TrailDBConstructor struct {
@@ -58,10 +60,17 @@ type Event struct {
 	items     []C.tdb_item
 }
 
+type Filter interface{}
+
 type FilterTerm struct {
 	IsNegative bool
 	Value      string
 	Field      string
+}
+
+type FilterTimeRange struct {
+	TimestampStart uint64
+	TimestampEnd   uint64
 }
 
 type EventFilter struct {
@@ -246,7 +255,20 @@ func Open(s string) (*TrailDB, error) {
 		maxTimestamp:  uint64(C.tdb_max_timestamp(db)),
 		fieldNames:    fields,
 		fieldNameToId: fieldNameToId,
+		path:          s,
 	}, nil
+}
+
+func (db *TrailDB) GetMinTimestamp() uint64 {
+	return db.minTimestamp
+}
+
+func (db *TrailDB) GetMaxTimestamp() uint64 {
+	return db.maxTimestamp
+}
+
+func (db *TrailDB) GetPath() string {
+	return db.path
 }
 
 func (db *TrailDB) GetFieldNames() []string {
@@ -488,7 +510,7 @@ func (evt *Event) ToStruct(data interface{}) interface{} {
 	return v
 }
 
-func (db *TrailDB) NewEventFilter(query [][]FilterTerm) *EventFilter {
+func (db *TrailDB) NewEventFilter(query [][]Filter) *EventFilter {
 	filter := EventFilter{filter: C.tdb_event_filter_new()}
 	for i, clause := range query {
 		if i > 0 {
@@ -497,24 +519,37 @@ func (db *TrailDB) NewEventFilter(query [][]FilterTerm) *EventFilter {
 				return nil
 			}
 		}
-		for _, term := range clause {
-			item := C.tdb_item(0)
-			field_id, err := db.GetField(term.Field)
-			if err == nil {
-				cs := C.CString(term.Value)
-				defer C.free(unsafe.Pointer(cs))
-				item = C.tdb_get_item(db.db,
-					C.tdb_field(field_id),
-					cs,
-					C.uint64_t(len(term.Value)))
-			}
-			isNegative := C.int(0)
-			if term.IsNegative {
-				isNegative = 1
-			}
-			ret := C.tdb_event_filter_add_term(filter.filter, item, isNegative)
-			if ret != 0 {
-				return nil
+		for _, f := range clause {
+			switch reflect.TypeOf(f).Name() {
+			case "FilterTimeRange":
+				term := f.(FilterTimeRange)
+				if term.TimestampStart > 0 || term.TimestampEnd > 0 {
+					ret := C.tdb_event_filter_add_time_range(filter.filter, C.uint64_t(term.TimestampStart), C.uint64_t(term.TimestampEnd))
+					if ret != 0 {
+						return nil
+					}
+					continue
+				}
+			case "FilterTerm":
+				term := f.(FilterTerm)
+				item := C.tdb_item(0)
+				field_id, err := db.GetField(term.Field)
+				if err == nil {
+					cs := C.CString(term.Value)
+					defer C.free(unsafe.Pointer(cs))
+					item = C.tdb_get_item(db.db,
+						C.tdb_field(field_id),
+						cs,
+						C.uint64_t(len(term.Value)))
+				}
+				isNegative := C.int(0)
+				if term.IsNegative {
+					isNegative = 1
+				}
+				ret := C.tdb_event_filter_add_term(filter.filter, item, isNegative)
+				if ret != 0 {
+					return nil
+				}
 			}
 		}
 	}
